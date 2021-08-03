@@ -1,0 +1,604 @@
+---
+title: "Fantasy football analysis"
+author: "Phi Le"
+date: "8/27/2019"
+output: html_document
+---
+
+## In this project, we will investigate two positions with a couple of scoring rules, paying particular attention to the within-group-summed-squares (wgss) of average fantasy scores.  The reason we are using these sets is that there is a ground truth: some players are worth more points on your team than others.  A similar evaluation might be used to score drivers for insurance, patients for readmission to the hospital after an illness, or job listings on LinkedIn.  The difference is that the NFL is kind enough to publish their stats for us. In this project, we analysis wide receiver (WR) performance by using WR2017 and WR2018.
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(purrr)
+library(glue)
+library(cluster)
+library(cluster.datasets)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+WR2017 <- read_csv(file = "WR 2017.csv", col_types = list(
+  Name = col_character(),
+  Receptions = col_double(),
+  Yards = col_double(),
+  Average = col_character(),
+  `Avrage/Game` = col_double(),
+  Long = col_character(),
+  TD = col_double(),
+  `20+` = col_double(),
+  `40+` = col_double(),
+  `1st` = col_double(),
+  `1st%` = col_character(),
+  Fumbles = col_double()
+))
+WR2018 <- read_csv(file = "WR 2018.csv", col_types = list(
+  Name = col_character(),
+  Receptions = col_double(),
+  Yards = col_double(),
+  Average = col_double(),
+  `Avrage/Game` = col_double(),
+  Long = col_double(),
+  TD = col_double(),
+  `20+` = col_double(),
+  `40+` = col_double(),
+  `1st` = col_double(),
+  `1st%` = col_double(),
+  Fumbles = col_double()
+))
+```
+
+### WR Data set analysis
+
+### View data
+```{r}
+WR2017
+```
++ There are some factors that was read as characters. We must clean them and transform them to double.
+
+### Checking missing data
+```{r}
+name <- names(WR2017)
+char_val <- which(map(WR2017, typeof)=='character')
+WR2017[char_val[2:4]] <- apply(WR2017[char_val[2:4]], 2, FUN = function(x){str_replace_all(x, pattern = "--", replacement = "NA")}) 
+WR2017 <- WR2017 %>% mutate(Long = str_replace(Long, pattern = "T", replacement = ""))
+WR2017[char_val[c(2:4)]] <-apply(WR2017[char_val[c(2:4)]], 2, FUN = function(x) parse_double(x))
+WR2017
+```
+
+
+
+### Number of missing values for each columns
+```{r}
+apply(WR2017[, 2:12], 2, FUN = function(x) sum(is.na(x)))
+```
+### Processing missing values
+```{r}
+WR2017 <- WR2017[-which(unlist(is.na(pmap(WR2017[2:12], sum )))), ]
+
+```
+
+
++ Since the players with missing data have all of other records as 0, it looks like those players did not play or wrong records. I suggest to remove those players from our classification.
+
+
+
+### K-Means for data without using scores
+
+```{r}
+k.max=20;
+wss <- sapply(1:k.max, function(k){lm=kmeans(WR2017[,c(2:12)],centers=k, nstart=50, iter.max=15); lm$tot.withinss/lm$totss})
+plot(wss)
+```
+
+  + From the plot, by elbow method we get k=5 is a good choice.
+  
+  
+### Silhouette method 
+
+```{r}
+k.max = 20
+d <- dist(WR2017[,c(2:12)])
+model_WR2017 <- hclust(d, method = "complete")
+treeLen <- nrow(WR2017)
+cut.model_WR2017 <- cutree(model_WR2017, k=5)
+sil<-silhouette(cut.model_WR2017,d )
+plot(sil)
+
+
+temp <- sapply(1:k.max, function(x){cut.model_WR2017 <- cutree(model_WR2017, x)
+sil<-silhouette(cut.model_WR2017,d )})
+
+plot(temp[[2]])
+
+for (i in c(2:k.max))
+  plot(temp[[i]])
+```
++ Elbow method gives us 5 clusters is optimal but Silhouette gives us 8 cluster is optimal.
+
+```{r}
+k=5
+WRkmeans_result <- kmeans(WR2017[,c(2:12)],5)
+WRkmeans_result
+```
+
++ Since all the factors are important, we don't have a universal way to rank the player or cluster in this case. Next part, we will discuss about ranking once we have score measure to determine how well a player is.
+
+### Ranking and clusters by scores
+
+  + In this part, we still use the clusters above where we did not adjust the data to scores. That means, we just added the scores factors to the clusters and we make ranking for both player and clusters.
+  
+  - For Standard rubric
+  
+```{r}
+k_means_WR2017_1 <- as_tibble(WR2017) %>% mutate(Yard_scores = WR2017$Yards*0.1) %>% mutate(TD_scores = WR2017$TD*6) %>% mutate(Fumble_scores = WR2017$Fumbles*(-2)) %>%  mutate(sum_scores = Yard_scores+ TD_scores+ Fumble_scores ) %>% mutate(Cluster = WRkmeans_result$cluster) %>% arrange(desc(sum_scores)) %>% mutate(rank = c(1:nrow(WR2017)))
+
+k_means_WR2017_1
+```
+
++ Variance for sum of scores for each cluster
+
+```{r}
+variance <- function(df){sd(df[[1]])}
+k_means_WR2017_1 %>% select(c(Cluster, sum_scores)) %>% group_by(Cluster) %>% nest() %>% transmute(Cluster, var = map_dbl(data, variance))
+```
+
+  - Points for the first down rubric
+
+```{r}
+k_means_WR2017_2 <- as_tibble(WR2017) %>% mutate(Yard_scores = WR2017$Yards*0.1) %>% mutate(TD_scores = WR2017$TD*6) %>% mutate(Fumble_scores = WR2017$Fumbles*(-2)) %>% mutate('1st_scores' = WR2017$'1st') %>% mutate(sum_scores = Yard_scores+ TD_scores+ Fumble_scores + .$'1st_scores') %>% mutate(Cluster = WRkmeans_result$cluster) %>% arrange(desc(sum_scores)) %>% mutate(rank = c(1:nrow(WR2017)))
+
+k_means_WR2017_2
+```
+
++ Variance for sum of scores for each cluster
+
+```{r}
+variance <- function(df){sd(df[[1]])}
+k_means_WR2017_2 %>% select(c(Cluster, sum_scores)) %>% group_by(Cluster) %>% nest() %>% transmute(Cluster, var = map_dbl(data, variance))
+
+```
+
++ So, from both results of variance, we don't see much difference in the order of variance, i.e., we still have larger variance for highest ranking cluster and smallest variance for lowest ranking cluster.
+
+
+
+### In this part, we will only use scores to make clusters and ranking for clusters also for players.
+
+Scoring rubrics.
+
+1.	Standard. 
+a.	Wide receivers:
+i.	0.1 points per positive receiving yard
+ii.	6 points for receiving touchdown
+iii.	-2 points per fumble
+b.	Quarterbacks
+i.	0.1 yard per passing yard
+ii.	6 points per passing touchdown
+iii.	-2 points/interception
+iv.	-0.5 point/sack
+
+2.	Points per first down
+a.	Wide receivers
+i.	0.1 points per positive receiving yard
+ii.	6 points for receiving touchdown
+iii.	-2 points per fumble
+iv.	1 point per first down
+b.	Quarterbacks
+i.	0.1 yard per passing yard
+ii.	6 points per passing touchdown
+iii.	-2 points/interception
+iv.	-0.5 point/sack
+v.	1 point / first down
+
+
+  + By Standard rubric
+  
+    - New data with scores
+  
+```{r}
+WR2017$Scores <- WR2017$Yards*0.1 + WR2017$TD*6 - WR2017$Fumbles*2
+WR_Scores <- tibble(Name = WR2017$Name)
+WR_Scores$Yards <- WR2017$Yards*0.1
+WR_Scores$TD <- WR2017$TD*6
+WR_Scores$Fumbles <- WR2017$Fumbles*(-2)
+WR_Scores
+```
+
++ K-means for score data only
+
+```{r}
+k.max=20;
+wss_scores <- sapply(1:k.max, function(k){lm=kmeans(WR_Scores[,c(2:4)],centers=k, nstart=50, iter.max=15); lm$tot.withinss/lm$totss})
+plot(wss_scores)
+```
+
+  - k=5 is a good choice by elbow method
+
+```{r}
+k=7
+WRkmeans_score_result <- kmeans(WR_Scores[,c(2:4)],7)
+WRkmeans_score_result
+```
+  
+  + Cluster list
+  
+```{r}
+player_cluster <- as_tibble(WR_Scores) %>% mutate(Cluster = WRkmeans_score_result$cluster) %>% mutate(sum_scores = Yards + TD + Fumbles) %>% arrange(group_by = desc(sum_scores)) %>% mutate(rank = c(1:nrow(.))) %>% arrange(rank)
+
+player_cluster
+```
+
+  + Rank on scores for clusters
+
+    - The above table has been ordered by the scores of players and the cluster number it belongs to. We see that with small amount of error, it is almost consistent with the cluster groups, i.e., 
+    
+  If sum of scores that is larger than 148.5, then that player belongs to cluster 1.
+    
+  If the sum is less than or equal to 148.5 and larger than 87.3, the player belongs to cluster 4
+    
+  If the sum is less than or equal to 87.3 and larger than 53, the player belongs to cluster 2
+    
+  If the sum is less than or equal to 53 and larger than 18, the player belongs to cluster 3
+    
+  If the sum is less than or equal to 18 the player belongs to cluster 5
+  
+    - It is supprising that our cluster without using the scores also quite the same to clusters by using scores only. The difference is the name of the cluster for not using scores which are labels 2,4,3,5,1 instead of 1, 4, 2, 3,5 as in the score method for ranking from highest points to lowest points.
+
++ Variance value for each cluster
+
+```{r}
+variance <- function(df){sd(df[[1]])}
+player_cluster %>% select(c(Cluster, sum_scores)) %>% group_by(Cluster) %>% nest() %>% transmute(Cluster, var = map_dbl(data, variance))
+```
+
+  + Points by the first down rubric
+
+    - New data with scores  
+```{r}
+
+WR_Scores_st <- tibble(Name = WR2017$Name)
+WR_Scores_st$Yards <- WR2017$Yards*0.1
+WR_Scores_st$TD <- WR2017$TD*6
+WR_Scores_st$Fumbles <- WR2017$Fumbles*(-2)
+WR_Scores_st$'1st' <- WR2017$'1st'
+WR_Scores_st
+```
+
++ K-means for score data only
+
+```{r}
+k.max=20;
+wss_scores_st <- sapply(1:k.max, function(k){lm=kmeans(WR_Scores_st[,c(2:4)],centers=k, nstart=50, iter.max=15); lm$tot.withinss/lm$totss})
+plot(wss_scores_st)
+```
+  
+    - k=7 is a good choice by elbow method but we take k=5 so we can compare to the standard score method
+
+```{r}
+k=5
+WRkmeans_score_result_st <- kmeans(WR_Scores_st[,c(2:5)],5)
+WRkmeans_score_result_st
+```
+
+
+  + Cluster list
+  
+```{r}
+player_cluster_st <- as_tibble(WR_Scores_st) %>% mutate(Cluster = WRkmeans_score_result_st$cluster) %>% mutate(sum_scores = Yards + TD + Fumbles + .$'1st') %>% arrange(group_by = desc(sum_scores)) %>% mutate(rank = c(1:nrow(.))) %>% arrange(rank)
+
+player_cluster_st
+```
+
++ Variance value for each cluster
+
+```{r}
+variance <- function(df){sd(df[[1]])}
+player_cluster_st %>% select(c(Cluster, sum_scores)) %>% group_by(Cluster) %>% nest() %>% transmute(Cluster, var = map_dbl(data, variance))
+```
+
+
+
+### Feature question
+
+- Since k-means uses Euclidean distance and we suppose that all factors have the same weight. Therefore, we will rescale all to [0,1]
+interval, then we use the rubric scores to give weight for the factors in rubric.
+
+#### Standard rubric
+
+```{r}
+va <- function(df){max(df)}
+me <- function(df){mean(df)}
+var_list <- map_dbl(.x = c(2:12), .f = ~va(WR2017[[.x]]))
+mean_list <- map_dbl(.x = c(2:12), .f = ~me(WR2017[[.x]]))
+WR2017_check <- WR2017[c(2:12)]/var_list[c(1:11)]
+test <- map_dfc(.x = c(2:12), .f = ~(WR2017[.x])/(var_list[.x-1]))
+WR2017_m <- as_tibble(test)
+WR2017_m$Name = WR2017$Name
+
+WR2017_m <- WR2017_m %>% mutate(TD = TD*6) %>% mutate(Yards = Yards*0.1) %>% mutate(Fumbles = Fumbles*(-2))  %>% mutate(Total_scores = TD + Yards + Fumbles)
+```
+
+```{r}
+k.max=20;
+#wss_scores_st <- sapply(1:k.max, function(k){lm=kmeans(WR2017_m[,c(1:11, 13)],centers=k, nstart=50, iter.max=15); lm$tot.withinss/lm$totss})
+
+wss_scores_st <- sapply(1:k.max, function(k){lm=kmeans(WR2017_m[,c("Yards", "TD", "Fumbles","Total_scores")],centers=k, nstart=50, iter.max=15); lm$tot.withinss/lm$totss})
+
+
+plot(wss_scores_st)
+
+```
+
+```{r}
+WRkmeans_score_result_st <- kmeans(WR2017_m[,c("Yards", "TD", "Fumbles", "Total_scores")],9)
+#WRkmeans_score_result_st <- kmeans(WR2017_m[,c(1:11, 13)],5)
+WRkmeans_score_result_st
+
+```
++ Ranking the clusters
+
+```{r}
+WR2017_m$Cluster <- WRkmeans_score_result_st$cluster
+WR2017_m <- WR2017_m %>% arrange(desc(Total_scores)) %>% mutate(Rank = c(1:nrow(WR2017_m)))
+WR2017_m
+
+```
+
++ Getting players names for prediction 2018 season later
+
+```{r}
+r17 <- unique(WR2017_m$Cluster)
+Cluster_rank_m <- sapply(r17,FUN = function(x){WR2017_m$Name[which(WR2017_m$Cluster == x)]})
+Cluster_rank_m
+
+```
+
+
++ WR2018 data
+
+```{r}
+WR2018
+
+```
+
+### We rescale and assign the weights for as in the rubric
+
+```{r}
+va <- function(df){max(df, na.rm = T)}
+me <- function(df){mean(df)}
+var_list <- map_dbl(.x = c(2:ncol(WR2018)), .f = ~va(WR2018[[.x]]))
+mean_list <- map_dbl(.x = c(2:ncol(WR2018)), .f = ~me(WR2018[[.x]]))
+WR2018_check <- WR2018[c(2:ncol(WR2018))]/var_list[c(1:11)]
+test <- map_dfc(.x = c(2:ncol(WR2018)), .f = ~(WR2018[.x])/(var_list[.x-1]))
+WR2018_m <- as_tibble(test)
+WR2018_m$Name = WR2018$Name
+
+WR2018_m <- WR2018_m %>% mutate(TD = TD*6) %>% mutate(Yards = Yards*0.1) %>% mutate(Fumbles = Fumbles*(-2))  %>% mutate(Total_scores = TD + Yards + Fumbles) %>% arrange(desc(Total_scores)) %>% filter(!is.na(Long))
+```
+
+
+### We will do the k-means with 9 clusters since we want to know how well our model was (Recall that we did 9 clusters for 2017 data)
+
+```{r}
+#WRkmeans_score_result_st_18 <- kmeans(WR2018_m[,c(1:11, 13)],5)
+WRkmeans_score_result_st_18 <- kmeans(WR2018_m[,c("Yards", "TD", "Fumbles", "Total_scores")],9)
+WRkmeans_score_result_st_18
+
+```
+
+### Ranking of players and clusters
+
+```{r}
+WR2018_m$Cluster <- WRkmeans_score_result_st_18$cluster
+WR2018_m <- WR2018_m %>% arrange(desc(Total_scores)) %>% mutate(Rank = c(1:nrow(WR2018_m)))
+WR2018_m
+
+```
+
+### Names of players in each cluster
+
+```{r}
+r18 <- unique(WR2018_m$Cluster)
+Cluster_rank_m_18 <- sapply(r18,FUN = function(x){WR2018_m$Name[which(WR2018_m$Cluster == x)]})
+Cluster_rank_m_18
+
+```
+
+
+
+### Names of players that is in 2018 clusters but not in the same cluster in 2017
+
+```{r}
+sapply(c(1:9), FUN = function(x){setdiff(Cluster_rank_m_18[[x]], Cluster_rank_m[[x]])})
+
+
+#setdiff(Cluster_rank_m_18_1st[[4]], Cluster_rank_m_18[[4]])
+
+#Cluster_rank_m_18[[4]]
+
+#Cluster_rank_m[[4]]
+
+```
+
+### Names of players that is in 2017 clusters but not in the same cluster in 2018
+
+```{r}
+sapply(c(1:9), FUN = function(x){setdiff(Cluster_rank_m[[x]], Cluster_rank_m_18[[x]])})
+
+
+#setdiff(Cluster_rank_m_18_1st[[4]], Cluster_rank_m_18[[4]])
+
+#Cluster_rank_m_18[[4]]
+
+#Cluster_rank_m[[4]]
+
+```
+
+###  Correctness prediction
+
+
++ Ration of the overlap number of player in the intersection of the 2017 and 2018 over the number of players in the 2018 clusters for the standard rubric
+
+
+```{r}
+lapply(c(1:9), FUN = function(x){(length(intersect(Cluster_rank_m[[x]], Cluster_rank_m_18[[x]])))/length(Cluster_rank_m_18[[x]])})
+```
+### Means testing for clusters
+
+```{r}
+r18 <- unique(WR2018_m$Cluster)
+r17 <- unique(WR2017_m$Cluster)
+means_18 <- sapply(r18,FUN = function(x){WR2018_m$Total_scores[which(WR2018_m$Cluster == x)]})
+means_17 <- sapply(r17,FUN = function(x){WR2017_m$Total_scores[which(WR2017_m$Cluster == x)]})
+```
+
+### T-test to equal means
+```{r}
+lapply(c(1:9), FUN = function(x){t.test(means_17[[x]], means_18[[x]])})
+
+#### Point per first down rubric
+```
+
+```{r}
+va <- function(df){max(df)}
+me <- function(df){mean(df)}
+var_list <- map_dbl(.x = c(2:12), .f = ~va(WR2017[[.x]]))
+mean_list <- map_dbl(.x = c(2:12), .f = ~me(WR2017[[.x]]))
+WR2017_check <- WR2017[c(2:12)]/var_list[c(1:11)]
+test <- map_dfc(.x = c(2:12), .f = ~(WR2017[.x])/(var_list[.x-1]))
+WR2017_m <- as_tibble(test)
+WR2017_m$Name = WR2017$Name
+
+WR2017_m_1st <- WR2017_m %>% mutate(TD = TD*6) %>% mutate(Yards = Yards*0.1) %>% mutate(Fumbles = Fumbles*(-2)) %>% mutate(Total_scores = TD + Yards + Fumbles + .$'1st')
+```
+
+```{r}
+k.max=20;
+#wss_scores_st <- sapply(1:k.max, function(k){lm=kmeans(WR2017_m[,c(1:11, 13)],centers=k, nstart=50, iter.max=15); lm$tot.withinss/lm$totss})
+
+wss_scores_st_1st <- sapply(1:k.max, function(k){lm=kmeans(WR2017_m_1st[,c("Yards", "TD", "Fumbles","1st","Total_scores")],centers=k, nstart=50, iter.max=15); lm$tot.withinss/lm$totss})
+
+
+plot(wss_scores_st_1st)
+
+```
+```{r}
+WRkmeans_score_result_st_1st <- kmeans(WR2017_m_1st[,c("Yards", "TD", "Fumbles", "1st", "Total_scores")],9)
+#WRkmeans_score_result_st <- kmeans(WR2017_m[,c(1:11, 13)],5)
+WRkmeans_score_result_st_1st
+
+```
++ Ranking the clusters
+
+```{r}
+WR2017_m_1st$Cluster <- WRkmeans_score_result_st_1st$cluster
+WR2017_m_1st <- WR2017_m_1st %>% arrange(desc(Total_scores)) %>% mutate(Rank = c(1:nrow(WR2017_m_1st)))
+WR2017_m_1st
+
+```
+
++ Getting players names for prediction 2018 season later
+
+```{r}
+r17 <- unique(WR2017_m_1st$Cluster)
+Cluster_rank_m_1st <- sapply(r17,FUN = function(x){WR2017_m_1st$Name[which(WR2017_m_1st$Cluster == x)]})
+
+
+mean_1st <- sapply(r17,FUN = function(x){WR2017_m_1st$Total_scores[which(WR2017_m_1st$Cluster == x)]})
+Cluster_rank_m_1st
+
+```
+
+
++ WR2018 data
+
+```{r}
+WR2018
+
+```
+
+### Rescale the data and do k-means with 9 clusters
+
+```{r}
+va <- function(df){max(df, na.rm = T)}
+me <- function(df){mean(df)}
+var_list <- map_dbl(.x = c(2:ncol(WR2018)), .f = ~va(WR2018[[.x]]))
+mean_list <- map_dbl(.x = c(2:ncol(WR2018)), .f = ~me(WR2018[[.x]]))
+WR2018_check <- WR2018[c(2:ncol(WR2018))]/var_list[c(1:11)]
+test <- map_dfc(.x = c(2:ncol(WR2018)), .f = ~(WR2018[.x])/(var_list[.x-1]))
+WR2018_m_1st <- as_tibble(test)
+WR2018_m_1st$Name = WR2018$Name
+
+WR2018_m_1st <- WR2018_m_1st %>% mutate(TD = TD*6) %>% mutate(Yards = Yards*0.1) %>% mutate(Fumbles = Fumbles*(-2))  %>% mutate(Total_scores = TD + Yards + Fumbles + .$'1st') %>% arrange(desc(Total_scores)) %>% filter(!is.na(Long))
+```
+```{r}
+#WRkmeans_score_result_st_18 <- kmeans(WR2018_m[,c(1:11, 13)],5)
+WRkmeans_score_result_st_18_1st <- kmeans(WR2018_m_1st[,c("Yards", "TD", "Fumbles","1st", "Total_scores")],9)
+WRkmeans_score_result_st_18_1st
+
+```
+
+```{r}
+WR2018_m_1st$Cluster <- WRkmeans_score_result_st_18_1st$cluster
+WR2018_m_1st <- WR2018_m_1st %>% arrange(desc(Total_scores)) %>% mutate(Rank = c(1:nrow(WR2018_m_1st)))
+WR2018_m_1st
+
+```
+
+
+```{r}
+r18 <- unique(WR2018_m_1st$Cluster)
+Cluster_rank_m_18_1st <- sapply(r18,FUN = function(x){WR2018_m_1st$Name[which(WR2018_m_1st$Cluster == x)]})
+Cluster_rank_m_18_1st
+
+means_18_1st <- sapply(r18,FUN = function(x){WR2018_m_1st$Total_scores[which(WR2018_m_1st$Cluster == x)]})
+```
+
+```{r}
+Cluster_rank_m_18
+```
+
+### Names of players that is in 2018 clusters but not in the same cluster in 2017
+
+```{r}
+sapply(c(1:9), FUN = function(x){setdiff(Cluster_rank_m_18_1st[[x]], Cluster_rank_m_1st[[x]])})
+```
+
+### Names of players that is in 2017 clusters but not in the same cluster in 2018 for rubric 2
+
+```{r}
+sapply(c(1:9), FUN = function(x){setdiff(Cluster_rank_m_1st[[x]], Cluster_rank_m_18_1st[[x]])})
+```
+
++ Error of prediction for point per first down (The ration of wrong players classified in 2018 in each cluster over the number of players in each cluster in 2018)
+
+```{r}
+
+lapply(c(1:9), FUN = function(x){(length(setdiff(Cluster_rank_m_18_1st[[x]], Cluster_rank_m_18[[x]])))/length(Cluster_rank_m_18_1st[[x]])})
+```
+
++ List of players that is classified wrong in 2018.
+
+```{r}
+lapply(c(1:9), FUN = function(x){setdiff(Cluster_rank_m_18_1st[[x]], Cluster_rank_m_18[[x]])})
+```
+
+
+### Mean values for clusters checking year 2017 and 2018
+
+```{r}
+WRkmeans_score_result_st_18$centers
+WRkmeans_score_result_st$centers
+```
+
+### T-test to equal means
+```{r}
+lapply(c(1:9), FUN = function(x){t.test(mean_1st[[x]], means_18_1st[[x]])})
+```
+
+
